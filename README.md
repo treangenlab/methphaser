@@ -1,4 +1,4 @@
-# Meth Phaser
+# MethPhaser
 
 Requirement: 
 1. pysam>=0.20.0
@@ -10,7 +10,7 @@ Requirement:
 
 Known Issue:
 1. Does not phase reads before the first phased block and after the last phased block
-2. Multiprocessing threads should be smaller than the total block number on the chromosome. e.g., MethPhaser cannot use 3 threads to phase 3 blocks, since the number of the gaps among 3 blocks is 2.  
+2. Multiprocessing threads should be smaller than the total block number on the chromosome. e.g., MethPhaser cannot use 3 threads to phase 3 blocks, because the number of the gaps among 3 blocks is 2.  
 3. MethPhaser sometimes ignore some very short reads (about 0.1% reads). Probably because of pysam. 
 
 

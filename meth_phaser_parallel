@@ -1,0 +1,282 @@
+#!/usr/bin/env python
+
+import math
+import subprocess
+import pandas as pd
+from multiprocessing import Pool
+import time
+import os
+import argparse
+import sys
+
+
+def parse_arg(argv):
+    """
+    Function for pasing arguments
+    """
+
+    parser = argparse.ArgumentParser(
+        description="methphaser: phase reads based on methlytion informaiton"
+    )
+    required_args = parser.add_argument_group("Required arguments")
+    # input set
+    required_args.add_argument(
+        "-b",
+        "--bam_file",
+        type=str,
+        help="input methylation annotated bam file",
+        required=True,
+        metavar="",
+    )
+    required_args.add_argument(
+        "-r",
+        "--reference",
+        type=str,
+        help="reference genome",
+        required=True,
+        metavar="",
+    )
+    required_args.add_argument(
+        "-g",
+        "--gtf",
+        type=str,
+        help="gtf file from whatshap visualization",
+        required=True,
+        metavar="",
+    )
+    required_args.add_argument(
+        "-vc",
+        "--vcf_called",
+        type=str,
+        help="called vcf file from HapCUT2",
+        required=True,
+        metavar="",
+    )
+    parser.add_argument(
+        "-vt",
+        "--vcf_truth",
+        type=str,
+        help="Truth vcf file for benchmarking",
+        default=None,
+        metavar="",
+    )
+    parser.add_argument(
+        "-t", "--threads", type=int, help="threads", default=1, metavar=""
+    )
+    parser.add_argument(
+        "-ml",
+        "--max_len",
+        type=int,
+        help="maximum homozygous region length for phasing, default: -1 (ignore the largest homozygous region, centromere), input -2 for not skipping anything",
+        default=-1,
+        metavar="",
+    )
+    parser.add_argument(
+        "-c",
+        "--cut_off",
+        type=float,
+        help="the minimum percentage of vote to determine a read's haplotype",
+        default=0.65,
+        metavar="",
+    )
+    parser.add_argument(
+        "-a",
+        "--assignment_min",
+        type=int,
+        help="minimum assigned read number for ranksum test",
+        default=2,
+        metavar="",
+    )
+    parser.add_argument(
+        "-o",
+        "--output_dir",
+        type=str,
+        help="output_directory",
+        default="work/",
+        metavar="",
+    )
+    parser.add_argument(
+        "-k",
+        "--k_iterations",
+        type=int,
+        help="use at most k iterations, use -1 for unlimited iterations.",
+        default="10",
+        metavar="",
+    )
+
+    if len(argv) == 0:
+        parser.print_help(sys.stderr)
+        sys.exit(1)
+    args = parser.parse_args(argv)
+
+    return args
+
+
+# def rename_process():
+
+
+def run_project_parallel(
+    param_list, start_pos, end_pos, chromosome, skipping_pair
+):  # modify this
+    bam_file = param_list.bam_file
+    ref_seq_file = param_list.reference
+    phased_block_file = param_list.gtf
+    vcf_called = param_list.vcf_called
+    vcf_truth = param_list.vcf_truth
+    output_dir = param_list.output_dir
+    max_iteration = param_list.k_iterations
+    minimum_confidence_vote = param_list.assignment_min
+    output_relationship_assignment_dir = os.path.join(output_dir, chromosome, f"{start_pos}_{end_pos}.csv")
+    output_chromosome_read_assignment_dir = os.path.join(output_dir, f"{chromosome}_read_assignment/")
+    if vcf_truth != None:
+        cmd_list = [
+            "methphasing",
+            "-b",
+            bam_file,
+            "-r",
+            ref_seq_file,
+            "-p",
+            phased_block_file,
+            "-vc",
+            vcf_called,
+            "-vt",
+            vcf_truth,
+            "-n",
+            f"{start_pos},{end_pos}",
+            "-m",
+            chromosome,
+            "-o",
+            output_relationship_assignment_dir,
+            "-k",
+            str(max_iteration),
+            "-s",
+            skipping_pair,
+            "-a",
+            str(minimum_confidence_vote),
+            "-ra",
+            output_chromosome_read_assignment_dir
+            # f"/data/yf20/meth_phasing/LSK/whole_genome_6/{chromosome}_read_assignment/",
+        ]
+    else:
+        cmd_list = [
+            "methphasing",
+            "-b",
+            bam_file,
+            "-r",
+            ref_seq_file,
+            "-p",
+            phased_block_file,
+            "-vc",
+            vcf_called,
+            "-n",
+            f"{start_pos},{end_pos}",
+            "-m",
+            chromosome,
+            "-o",
+            output_relationship_assignment_dir,
+            "-k",
+            str(max_iteration),
+            "-s",
+            skipping_pair,
+            "-a",
+            str(minimum_confidence_vote),
+            "-ra",
+            output_chromosome_read_assignment_dir,
+        ]
+    os.makedirs(
+        os.path.join(output_dir, chromosome), exist_ok=True
+    )
+    os.makedirs(
+        output_chromosome_read_assignment_dir,
+        exist_ok=True,
+    )
+    # print(cmd_list)
+    subprocess.run(cmd_list)
+
+def main(argv):
+    args = parse_arg(argv)
+    threads = args.threads  # 32
+    vcf_truth = args.vcf_truth
+    ref_seq_file = args.reference
+    bam_file = args.bam_file
+    phased_block_file = args.gtf  
+    vcf_called = args.vcf_called
+    phasing_max_len = args.max_len
+    cut_off = args.cut_off
+    assignment_min = args.assignment_min
+    output_dir = args.output_dir
+    k_iterations = args.k_iterations
+    ref_seq_index = pd.read_csv(f"{ref_seq_file}.fai", sep="\t", header=None)
+    chromosomes = list(ref_seq_index[0])
+    phased_block_df = pd.read_csv(
+        phased_block_file,
+        header=None,
+        sep="\t",
+        names=[
+            "chr",
+            "phasing",
+            "ex/intron",
+            "start",
+            "end",
+            "1",
+            "strand",
+            "2",
+            "info",
+        ],
+    )
+    phased_df_chr = phased_block_df.groupby(["chr"])
+    for chromosome in chromosomes:
+        chr_block_num = len(phased_block_df[phased_block_df["chr"] == chromosome])
+        if chr_block_num == 0:
+            print(f"no reads aligned to chromosome {chromosome}, skipping...")
+            continue
+        phasd_df_chr_list = list(
+            phased_df_chr.get_group(chromosome).iterrows()
+        )  # skipping pair calculation
+        phased_block_distance_dict = {}
+        for index, i in enumerate(phasd_df_chr_list[:-1]):
+            phased_block_distance_dict.update(
+                {index: phasd_df_chr_list[index + 1][1].start - i[1].end}
+            )
+        phased_block_distance_list_sorted = [
+            (k, v)
+            for k, v in sorted(
+                phased_block_distance_dict.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+        ]
+        skipping_pair_start_list = [-1]
+        if phasing_max_len == -1:
+            skipping_pair_start_list.append(phased_block_distance_list_sorted[0][0])
+        elif phasing_max_len != -2:
+            for i in phased_block_distance_list_sorted:
+                if i[1] >= phasing_max_len:
+                    skipping_pair_start_list.append(i[0])
+        # else:
+        #     skipping_pair_start_list = [-1]
+        skipping_pair_start_list = str(skipping_pair_start_list)
+
+        total_block_n = chr_block_num
+        param_list = []
+        interval_list = []
+        block_size = math.ceil(total_block_n / threads)
+        for i in range(threads):
+            start_pos = i * block_size
+            end_pos = (i + 1) * block_size + 1
+            if end_pos >= total_block_n:
+                end_pos = total_block_n
+                interval_list.append(
+                    (args, start_pos, end_pos, chromosome, skipping_pair_start_list)
+                )
+                break
+            interval_list.append(
+                (args, start_pos, end_pos, chromosome, skipping_pair_start_list)
+            )
+        # print(interval_list)
+        with Pool(threads) as pool:
+            L = pool.starmap(run_project_parallel, interval_list)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

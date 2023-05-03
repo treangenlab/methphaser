@@ -1,0 +1,1471 @@
+#!/usr/bin/env python
+
+
+from pkg_resources import require
+import pysam
+import re
+import warnings
+import argparse
+import sys
+import os
+import pandas as pd
+
+# from tqdm.auto import tqdm
+from scipy import stats
+from matplotlib import pyplot
+from collections import Counter
+import numpy as np
+from pysam import VariantFile
+
+warnings.filterwarnings("ignore")
+
+
+"""
+methphaser: phase reads based on methlytion informaiton
+@author: Yilei Fu
+@Email: yilei.fu@nanoporetech.com, yf20@rice.edu
+"""
+
+
+def parse_arg(argv):
+    """
+    Function for pasing arguments
+    """
+
+    parser = argparse.ArgumentParser(
+        description="methphaser: phase reads based on methlytion informaiton"
+    )
+    required_args = parser.add_argument_group("Required arguments")
+    # input set
+    required_args.add_argument(
+        "-b",
+        "--bam_file",
+        type=str,
+        help="input methylation annotated bam file",
+        required=True,
+        metavar="",
+    )
+    required_args.add_argument(
+        "-r",
+        "--reference",
+        type=str,
+        help="reference genome",
+        required=True,
+        metavar="",
+    )
+    required_args.add_argument(
+        "-p",
+        "--phased_blocks",
+        type=str,
+        help="gtf file from whatshap visualization",
+        required=True,
+        metavar="",
+    )
+    required_args.add_argument(
+        "-vc",
+        "--vcf_called",
+        type=str,
+        help="called vcf file from HapCUT2",
+        required=True,
+        metavar="",
+    )
+
+
+    parser.add_argument(
+        "-t", "--threads", type=int, help="threads, default 1", default=1, metavar=""
+    )
+    parser.add_argument(
+        "-vt",
+         "--vcf_truth",
+        type=str,
+        help="GIAB truth vcf file for benchmarking",
+        default="",
+        metavar="",
+    )
+    parser.add_argument(
+        "-c",
+        "--cut_off",
+        type=float,
+        help="the minimum percentage of vote to determine a read's haplotype, default 0.65",
+        default=0.65,
+        metavar="",
+    )
+    parser.add_argument(
+        "-a",
+        "--assignment_min",
+        type=int,
+        help="minimum assigned read number for ranksum test, default 2",
+        default=2,
+        metavar="",
+    )
+    parser.add_argument(
+        "-m",
+        "--chromosome",
+        type=str,
+        help="the chromosome for read phasing, default chr1",
+        default="chr1",
+        metavar="",
+    )
+    parser.add_argument(
+        "-n",
+        "--targeting_blocks",
+        type=str,
+        help="only process the blocks from <m, n>, for testing,, default: all",
+        default="all",
+        metavar="",
+    )
+    parser.add_argument(
+        "-o",
+        "--output_csv",
+        type=str,
+        help="comparison csv file, default: meth_truth_comparison.csv",
+        default="meth_truth_comparison.csv",
+        metavar="",
+    )
+    parser.add_argument(
+        "-s",
+        "--skipping_pair",
+        type=str,
+        help="a list of number [a, b, ...]. The program will skip the block pair of <a, a+1>, <b, b+1>, ... mainly for avoiding centromere region.",
+        default="[0]",
+        metavar="",
+    )
+    parser.add_argument(
+        "-k",
+        "--k_iterations",
+        type=int,
+        help="use at most k iterations, default: 10, use -1 for unlimited iterations",
+        default="10",
+        metavar="",
+    )
+    parser.add_argument(
+        "-ra",
+        "--read_assignment",
+        type=str,
+        help="output read assignment csv folder. The output csv will be folder/phase-block.csv",
+        default=None,
+        metavar="",
+    )
+
+    parser.add_argument(
+        "-ms",
+        "--max_SNPs",
+        type=int,
+        help="max SNPs number to the edge of SNP pahsed block, default is unlimited",
+        default=None,
+        metavar="",
+    )
+
+    parser.add_argument(
+        "-bo",
+        "--bridge_only",
+        type=bool,
+        help="bridge gaps only, do not phase reads.",
+        default=False,
+        metavar="",
+    )
+
+
+    if len(argv) == 0:
+        parser.print_help(sys.stderr)
+        sys.exit(1)
+    args = parser.parse_args(argv)
+
+    return args
+
+
+def get_base_modification_dictionary(
+    bam_file, ref_seq, chromosome, phase_region, snp_phase_region
+):
+    """
+    This is for the first time phasing within SNP phased block
+    Return value: a dictionary that contains cpg location and its haplotype related base modification score
+    """
+    methylation_identifier_0 = ('C', 0, 'm') # We only care about 5mc!!!
+    methylation_identifier_1 = ('C', 1, 'm')
+    phase_region_start = phase_region[0]
+    phase_region_end = phase_region[1]
+
+    phased_block_ref = ref_seq.fetch(
+        chromosome, phase_region_start, phase_region_end)
+    cg_loc = [
+        m.start(0) for m in re.finditer("CG", str(phased_block_ref))
+    ]  # Use regular expression to find all CpG locations on the reference
+    # record G locatioon of 'CG's
+    cg_loc = [x + phase_region_start + 1 for x in cg_loc]
+    hp_myth_dict = dict()
+    """
+        Data structure:
+        {i:[[], [], [], [0, 0, 0]]} 
+            i: CpG locations
+            []: per haplotype base modification score, max 255
+            0: per haplotype base coverage
+        Use dictionary so that when querying CpG locations the time complexity is O(1)
+    """
+    for i in cg_loc:
+        # build the dictionary
+        hp_myth_dict.update({i: [[], [], [], [0, 0, 0]]})
+    phased_block_alignment = bam_file.fetch(
+        chromosome, snp_phase_region[0], snp_phase_region[1], multiple_iterators=True
+    )
+
+    for reads in phased_block_alignment:
+        read_base_ref_loc = reads.get_reference_positions(
+            full_length=True
+        )  # use full_length=True or the positions won't match
+        mm = (
+            reads.modified_bases
+        )  # mm is a dictionary that contains {score type: [(location, score)]}. score is 255-based
+        HP = 0
+        if reads.has_tag("HP"):  # update read number list
+            if reads.get_tag("HP") == 1:
+                HP = 1
+                for i in read_base_ref_loc:
+                    if i in hp_myth_dict.keys():  # O(1) search
+                        hp_myth_dict[i][3][
+                            1
+                        ] += 1  # increase the per haplotype base coverage on each CpG locaitons
+            else:
+                HP = 2
+                for i in read_base_ref_loc:
+                    if i in hp_myth_dict.keys():
+                        hp_myth_dict[i][3][2] += 1
+        else:
+            HP = 0
+            for i in read_base_ref_loc:
+                if i in hp_myth_dict.keys():
+                    hp_myth_dict[i][3][0] += 1
+        if (mm != -1) and (mm != {}):  # update base modification scores list
+            if methylation_identifier_0 in list(mm.keys()):
+                methylation_identifier = methylation_identifier_0
+            else:
+                methylation_identifier = methylation_identifier_1
+            for i in mm[methylation_identifier]:  # Remora only output one type of score: c 1 m/c 0 m, but this part can be improved for other methlyation callers
+                if read_base_ref_loc[i[0]]:  # i format: (loc, score)
+                    if reads.is_forward:  # cg/gc on forward and reverse reads
+                        mm_ref_loc = read_base_ref_loc[i[0]] + 1
+                    else:
+                        mm_ref_loc = read_base_ref_loc[i[0]]
+                    if mm_ref_loc in hp_myth_dict.keys():
+                        modification_chance = i[1]  # 0 - 255 based
+                        if HP == 1:
+                            hp_myth_dict[mm_ref_loc][1].append(
+                                modification_chance
+                            )  # add the score to the list
+                        elif HP == 2:
+                            hp_myth_dict[mm_ref_loc][2].append(
+                                modification_chance)
+                        else:
+                            hp_myth_dict[mm_ref_loc][0].append(
+                                modification_chance)
+    return hp_myth_dict
+
+
+def get_modified_list(assignment_df, phase_region, sam_file, chromosome, ref_seq):
+    """
+    Build the same dictionary as SNP phased region one,
+    and update this one during the iterations
+    difference between get_base_modification_dictionary:
+        different regions, different HP0 filtering
+    """
+    methylation_identifier_0 = ('C', 0, 'm') # We only care about 5mc!!!
+    methylation_identifier_1 = ('C', 1, 'm')
+    # methylation_identifier = ('C', 0, 'm')
+
+    phase_region_start = phase_region[0]
+    phase_region_end = phase_region[1]
+    phased_block_ref = ref_seq.fetch(
+        chromosome, phase_region_start, phase_region_end)
+    cg_loc = [m.start(0) for m in re.finditer("CG", str(phased_block_ref))]
+    cg_loc = [x + phase_region_start + 1 for x in cg_loc]
+    hp_myth_dict = dict()
+    for i in cg_loc:
+        hp_myth_dict.update({i: [[], [], [], [0, 0, 0]]})
+    phased_block_alignment = sam_file.fetch(
+        chromosome, phase_region_start, phase_region_end
+    )
+
+    for reads in phased_block_alignment:
+        read_base_ref_loc = reads.get_reference_positions(full_length=True)
+        mm = reads.modified_bases
+        HP = 0
+
+        if reads.query_name in list(
+            assignment_df.read_id
+        ):  # which means the read was marked as HP 0 by Whatshap
+            read_row = assignment_df[assignment_df.read_id == reads.query_name]
+            read_reassign_haplotype = read_row.iloc[0].haplotype
+            if read_reassign_haplotype == 1:
+                HP = 1
+                for i in read_base_ref_loc:
+                    if i in hp_myth_dict.keys():
+                        hp_myth_dict[i][3][1] += 1
+            elif read_reassign_haplotype == 2:
+                HP = 2
+                for i in read_base_ref_loc:
+                    if i in hp_myth_dict.keys():
+                        hp_myth_dict[i][3][2] += 1
+            else:
+                HP = 0
+                for i in read_base_ref_loc:
+                    if i in hp_myth_dict.keys():
+                        hp_myth_dict[i][3][0] += 1
+
+            if mm != -1 and mm != {} :
+                if methylation_identifier_0 in list(mm.keys()):
+                    methylation_identifier = methylation_identifier_0
+                else:
+                    methylation_identifier = methylation_identifier_1
+                for i in mm[methylation_identifier]:
+                    if read_base_ref_loc[i[0]]:
+                        if reads.is_forward:
+                            mm_ref_loc = read_base_ref_loc[i[0]] + 1
+                        else:
+                            mm_ref_loc = read_base_ref_loc[i[0]]
+                        if mm_ref_loc in hp_myth_dict.keys():
+                            modification_chance = i[1]
+                            if HP == 1:
+                                hp_myth_dict[mm_ref_loc][1].append(
+                                    modification_chance)
+                            elif HP == 2:
+                                hp_myth_dict[mm_ref_loc][2].append(
+                                    modification_chance)
+                            else:
+                                hp_myth_dict[mm_ref_loc][0].append(
+                                    modification_chance)
+    return hp_myth_dict
+
+
+def build_df(previous_assignment_df, hp_list):
+    for i in hp_list:
+        if i[0] not in list(previous_assignment_df.read_id):
+            previous_assignment_df.loc[len(previous_assignment_df.index)] = i
+        else:
+            previous_assignment_df[previous_assignment_df.read_id == i[0]] = i
+    return previous_assignment_df
+
+
+def get_base_modification_list(
+    bam_file,
+    ref_seq,
+    chromosome,
+    phase_region,
+    hp_base_modification_probablity,
+    previous_assignment_df,
+    assignmet_threshold,
+    assignment_min_number,
+):
+    """
+    This funciton takes the CpG locations' hp based base modificaiton score dictionary as input
+    outputs a dataframe that have read assignment information.
+    This function is included in the iterations.
+    args:
+        phase_region: extended regions for read phasing
+    outputs:
+    """
+    # methylation_identifier = ('C', 0, 'm')
+    methylation_identifier_0 = ('C', 0, 'm') # We only care about 5mc!!!
+    methylation_identifier_1 = ('C', 1, 'm')
+    phase_region_start = phase_region[0]
+    phase_region_end = phase_region[1]
+    phased_block_alignment = bam_file.fetch(
+        chromosome, phase_region_start, phase_region_end, multiple_iterators=True
+    )
+    assignment_list = []
+    previous_assignment_df_hp_0 = previous_assignment_df[
+        previous_assignment_df.haplotype == 0
+    ]  # get all un-assigned reads from previous iterations
+    for reads in phased_block_alignment:
+        if reads.query_name in list(previous_assignment_df_hp_0.read_id):
+            hp_0_probablity = dict()  # init a new dictionary to store the
+            read_base_ref_loc = reads.get_reference_positions(full_length=True)
+            read_base_ref_loc_aligned = reads.get_reference_positions(
+                full_length=False
+            )  # For display
+            mm = reads.modified_bases
+            read_length = reads.query_length
+            if mm != -1 and mm != {}:
+                if methylation_identifier_0 in list(mm.keys()):
+                    methylation_identifier = methylation_identifier_0
+                else:
+                    methylation_identifier = methylation_identifier_1
+                for i in mm[methylation_identifier]:
+                    if read_base_ref_loc[i[0]]:
+                        if reads.is_forward:
+                            mm_ref_loc = read_base_ref_loc[i[0]] + 1
+                        else:
+                            mm_ref_loc = read_base_ref_loc[i[0]]
+
+                        if mm_ref_loc in hp_base_modification_probablity.keys():
+                            modification_chance = i[1] / 255
+                            hp_1_prob = hp_base_modification_probablity[mm_ref_loc][0]
+                            hp_2_prob = hp_base_modification_probablity[mm_ref_loc][1]
+                            assignment = 0
+                            if hp_1_prob != None and hp_2_prob != None:
+                                if abs(hp_1_prob - modification_chance) > abs(
+                                    hp_2_prob - modification_chance
+                                ):
+                                    assignment = 2
+                                elif abs(hp_1_prob - modification_chance) < abs(
+                                    hp_2_prob - modification_chance
+                                ):
+                                    assignment = 1
+                            probablity_result = hp_base_modification_probablity[
+                                mm_ref_loc
+                            ] + [modification_chance, assignment]
+                            hp_0_probablity.update(
+                                {mm_ref_loc: probablity_result})
+                assignment_df = pd.DataFrame.from_dict(
+                    hp_0_probablity,
+                    orient="index",
+                    columns=[
+                        "hp_1_prob",
+                        "hp_2_prob",
+                        "p-value",
+                        "hp_0_prob",
+                        "assignment",
+                    ],
+                )
+                # final_assignment_df.append(assignment_df)
+                if len(assignment_df) == 0:
+                    assignment_list.append(
+                        [
+                            reads.query_name,
+                            read_length,
+                            phase_region_start,
+                            read_base_ref_loc_aligned[0],
+                            read_base_ref_loc_aligned[-1],
+                            0,
+                            None,
+                            len(assignment_df),
+                            None,
+                        ]
+                    )
+                elif len(assignment_df) <= assignment_min_number:
+                    if len(assignment_df[assignment_df.assignment == 1]) / len(
+                        assignment_df
+                    ) >= len(assignment_df[assignment_df.assignment == 2]) / len(
+                        assignment_df
+                    ):
+                        assignment_list.append(
+                            [
+                                reads.query_name,
+                                read_length,
+                                phase_region_start,
+                                read_base_ref_loc_aligned[0],
+                                read_base_ref_loc_aligned[-1],
+                                0,
+                                len(assignment_df[assignment_df.assignment == 1]),
+                                len(assignment_df),
+                                len(assignment_df[assignment_df.assignment == 1])
+                                / len(assignment_df),
+                            ]
+                        )
+                    else:
+                        assignment_list.append(
+                            [
+                                reads.query_name,
+                                read_length,
+                                phase_region_start,
+                                read_base_ref_loc_aligned[0],
+                                read_base_ref_loc_aligned[-1],
+                                0,
+                                len(assignment_df[assignment_df.assignment == 2]),
+                                len(assignment_df),
+                                len(assignment_df[assignment_df.assignment == 2])
+                                / len(assignment_df),
+                            ]
+                        )
+                    continue
+                elif (
+                    len(assignment_df[assignment_df.assignment == 1])
+                    / len(assignment_df)
+                    >= assignmet_threshold
+                ):
+                    assignment_list.append(
+                        [
+                            reads.query_name,
+                            read_length,
+                            phase_region_start,
+                            read_base_ref_loc_aligned[0],
+                            read_base_ref_loc_aligned[-1],
+                            1,
+                            len(assignment_df[assignment_df.assignment == 1]),
+                            len(assignment_df),
+                            len(assignment_df[assignment_df.assignment == 1])
+                            / len(assignment_df),
+                        ]
+                    )
+                elif (
+                    len(assignment_df[assignment_df.assignment == 2])
+                    / len(assignment_df)
+                    >= assignmet_threshold
+                ):
+                    assignment_list.append(
+                        [
+                            reads.query_name,
+                            read_length,
+                            phase_region_start,
+                            read_base_ref_loc_aligned[0],
+                            read_base_ref_loc_aligned[-1],
+                            2,
+                            len(assignment_df[assignment_df.assignment == 2]),
+                            len(assignment_df),
+                            len(assignment_df[assignment_df.assignment == 2])
+                            / len(assignment_df),
+                        ]
+                    )
+                else:
+                    if len(assignment_df[assignment_df.assignment == 1]) / len(
+                        assignment_df
+                    ) >= len(assignment_df[assignment_df.assignment == 2]) / len(
+                        assignment_df
+                    ):
+                        assignment_list.append(
+                            [
+                                reads.query_name,
+                                read_length,
+                                phase_region_start,
+                                read_base_ref_loc_aligned[0],
+                                read_base_ref_loc_aligned[-1],
+                                0,
+                                len(assignment_df[assignment_df.assignment == 1]),
+                                len(assignment_df),
+                                len(assignment_df[assignment_df.assignment == 1])
+                                / len(assignment_df),
+                            ]
+                        )
+                    else:
+                        assignment_list.append(
+                            [
+                                reads.query_name,
+                                read_length,
+                                phase_region_start,
+                                read_base_ref_loc_aligned[0],
+                                read_base_ref_loc_aligned[-1],
+                                0,
+                                len(assignment_df[assignment_df.assignment == 2]),
+                                len(assignment_df),
+                                len(assignment_df[assignment_df.assignment == 2])
+                                / len(assignment_df),
+                            ]
+                        )
+                    continue
+
+    return build_df(previous_assignment_df, assignment_list)
+
+
+def get_base_modification_list_snp_block(
+    bam_file,
+    ref_seq,
+    chromosome,
+    phase_region,
+    hp_base_modification_probablity,
+    previous_assignment_df,
+    assignmet_threshold,
+    assignment_min_number,
+):
+    """
+    Assign reads.
+    - Get reads' CpGs' base modification probablity
+    - Collect votes
+    """
+
+    # methylation_identifier = ('C', 0, 'm')
+    methylation_identifier_0 = ('C', 0, 'm') # We only care about 5mc!!!
+    methylation_identifier_1 = ('C', 1, 'm')
+    phase_region_start = phase_region[0]
+    phase_region_end = phase_region[1]
+    phased_block_alignment = bam_file.fetch(
+        chromosome, phase_region_start, phase_region_end, multiple_iterators=True
+    )
+
+    assignment_list = []
+    for reads in phased_block_alignment:
+        if (
+            reads.has_tag("HP")
+        ) == False:  # Does not have hp tag means it's SNP unphased read
+            hp_0_probablity = dict()
+            read_base_ref_loc = reads.get_reference_positions(full_length=True)
+            read_base_ref_loc_aligned = reads.get_reference_positions(
+                full_length=False)
+            mm = reads.modified_bases
+            read_length = reads.query_length
+            if mm != -1 and mm != {}:
+                if methylation_identifier_0 in list(mm.keys()):
+                    methylation_identifier = methylation_identifier_0
+                else:
+                    methylation_identifier = methylation_identifier_1
+                for i in mm[methylation_identifier]:
+                    if read_base_ref_loc[i[0]]:
+                        if reads.is_forward:
+                            mm_ref_loc = read_base_ref_loc[i[0]] + 1
+                        else:
+                            mm_ref_loc = read_base_ref_loc[i[0]]
+
+                        if mm_ref_loc in hp_base_modification_probablity.keys():
+                            modification_chance = (
+                                i[1] / 255
+                            )  # The modificaiton score / 255, per read
+                            hp_1_prob = hp_base_modification_probablity[mm_ref_loc][0]
+                            hp_2_prob = hp_base_modification_probablity[mm_ref_loc][1]
+                            assignment = 0
+                            if hp_1_prob != None and hp_2_prob != None:
+                                # determine the probablity is closer to which
+                                if abs(hp_1_prob - modification_chance) > abs(
+                                    hp_2_prob - modification_chance
+                                ):
+                                    assignment = 2
+                                elif abs(hp_1_prob - modification_chance) < abs(
+                                    hp_2_prob - modification_chance
+                                ):
+                                    assignment = 1
+
+                            probablity_result = hp_base_modification_probablity[
+                                mm_ref_loc
+                            ] + [
+                                modification_chance,
+                                assignment,
+                            ]  # see dataframe column
+                            hp_0_probablity.update(
+                                {mm_ref_loc: probablity_result})
+                assignment_df = pd.DataFrame.from_dict(
+                    hp_0_probablity,
+                    orient="index",
+                    columns=[
+                        "hp_1_prob",
+                        "hp_2_prob",
+                        "p-value",
+                        "hp_0_prob",
+                        "assignment",
+                    ],
+                )
+                # final_assignment_df.append(assignment_df)
+                if len(assignment_df) == 0:
+                    assignment_list.append(
+                        [
+                            reads.query_name,
+                            read_length,
+                            phase_region_start,
+                            read_base_ref_loc_aligned[0],
+                            read_base_ref_loc_aligned[-1],
+                            0,
+                            None,
+                            len(assignment_df),
+                            None,
+                        ]
+                    )
+                # the haplotype coverage is not enough
+                elif len(assignment_df) <= assignment_min_number:
+                    if len(assignment_df[assignment_df.assignment == 1]) / len(
+                        assignment_df
+                    ) >= len(assignment_df[assignment_df.assignment == 2]) / len(
+                        assignment_df
+                    ):
+                        assignment_list.append(
+                            [
+                                reads.query_name,
+                                read_length,
+                                phase_region_start,
+                                read_base_ref_loc_aligned[0],
+                                read_base_ref_loc_aligned[-1],
+                                0,  # The haplotypes are lesser than required number, so add 0
+                                len(assignment_df[assignment_df.assignment == 1]),
+                                len(assignment_df),
+                                len(assignment_df[assignment_df.assignment == 1])
+                                / len(assignment_df),
+                            ]
+                        )
+                    else:
+                        assignment_list.append(
+                            [
+                                reads.query_name,
+                                read_length,
+                                phase_region_start,
+                                read_base_ref_loc_aligned[0],
+                                read_base_ref_loc_aligned[-1],
+                                0,
+                                len(assignment_df[assignment_df.assignment == 2]),
+                                len(assignment_df),
+                                len(assignment_df[assignment_df.assignment == 2])
+                                / len(assignment_df),
+                            ]
+                        )
+                    continue
+                elif (
+                    len(assignment_df[assignment_df.assignment == 1])
+                    / len(assignment_df)
+                    >= assignmet_threshold
+                ):  # enough haplotype coverage, calculate the vote
+                    assignment_list.append(
+                        [
+                            reads.query_name,
+                            read_length,
+                            phase_region_start,
+                            read_base_ref_loc_aligned[0],
+                            read_base_ref_loc_aligned[-1],
+                            1,  # assign the haplotype
+                            len(assignment_df[assignment_df.assignment == 1]),
+                            len(assignment_df),
+                            len(assignment_df[assignment_df.assignment == 1])
+                            / len(assignment_df),
+                        ]
+                    )
+                elif (
+                    len(assignment_df[assignment_df.assignment == 2])
+                    / len(assignment_df)
+                    >= assignmet_threshold
+                ):
+                    assignment_list.append(
+                        [
+                            reads.query_name,
+                            read_length,
+                            phase_region_start,
+                            read_base_ref_loc_aligned[0],
+                            read_base_ref_loc_aligned[-1],
+                            2,
+                            len(assignment_df[assignment_df.assignment == 2]),
+                            len(assignment_df),
+                            len(assignment_df[assignment_df.assignment == 2])
+                            / len(assignment_df),
+                        ]
+                    )
+                else:
+                    if len(assignment_df[assignment_df.assignment == 1]) / len(
+                        assignment_df
+                    ) >= len(assignment_df[assignment_df.assignment == 2]) / len(
+                        assignment_df
+                    ):
+                        assignment_list.append(
+                            [
+                                reads.query_name,
+                                read_length,
+                                phase_region_start,
+                                read_base_ref_loc_aligned[0],
+                                read_base_ref_loc_aligned[-1],
+                                0,
+                                len(assignment_df[assignment_df.assignment == 1]),
+                                len(assignment_df),
+                                len(assignment_df[assignment_df.assignment == 1])
+                                / len(assignment_df),
+                            ]
+                        )
+                    else:
+                        assignment_list.append(
+                            [
+                                reads.query_name,
+                                read_length,
+                                phase_region_start,
+                                read_base_ref_loc_aligned[0],
+                                read_base_ref_loc_aligned[-1],
+                                0,
+                                len(assignment_df[assignment_df.assignment == 2]),
+                                len(assignment_df),
+                                len(assignment_df[assignment_df.assignment == 2])
+                                / len(assignment_df),
+                            ]
+                        )
+                    continue
+    return build_df(previous_assignment_df, assignment_list)
+
+
+def get_siginificant_probablity_dict(hp_myth_dict, hp_myth_list_new={}, hp_min_num=3):
+    """
+    This function takes base modificaiton score list as input, output a dict that
+    also contains base modification probablity with SNP unphased reads
+    In this function, we perform ranksum test
+
+    data structure: {i:[hp_1_prob, hp_2_prob, p-value]}
+        i: CpG locations
+        hp_1/2_prob = sum(base modification score)/(per-base per-haplotype coverage)
+        p-value: calculated with scipy package
+
+
+    args:
+        hp_myth_list_new: the base modificaiton list from last iteration
+        hp_myth_dict: format
+            {
+                location: ([[hp0_scores], [hp1_scores], [hp2_scores], [hp0_read_n, hp1_read_n, hp2_read_n]] )
+            }
+    outputs:
+        hp_base_modification_probablity: a dictionary that contians the locations where the 2 hps have siginificant
+        different behaves
+
+    """
+    hp_base_modification_probablity = dict()
+    for index, (location, modifications) in enumerate(hp_myth_dict.items()):  # see args
+        # the aggregated score of hp1
+        hp_1_probablity_sum = sum(modifications[1])
+        hp_2_probablity_sum = sum(modifications[2])
+        hp_1_new_num = 0
+        hp_2_new_num = 0
+        hps = [[], [], []]
+        if (
+            location in hp_myth_list_new.keys()
+        ):  # new and old should have the same index (CpG locations)
+            hps = hp_myth_list_new[location]
+            # the aggregated score of hp1
+            hp_1_probablity_sum_new = sum(hps[1])
+            hp_1_probablity_sum += hp_1_probablity_sum_new  # old + new
+            hp_2_probablity_sum_new = sum(hps[2])
+            hp_2_probablity_sum += hp_2_probablity_sum_new
+            # hp_1_new_num = hps[3][1] # new read number
+            # hp_2_new_num = hps[3][2]
+        # hp_1_num = modifications[3][1] + hp_1_new_num
+        # hp_2_num = modifications[3][2] + hp_2_new_num
+        h1_full_list = modifications[1] + hps[1]
+        h2_full_list = modifications[2] + hps[2]
+        if (len(h1_full_list) >= hp_min_num) and (
+            len(h2_full_list) >= hp_min_num
+        ):  # enough hp info in this location
+            hp_1_probablity = hp_1_probablity_sum / (255 * len(h1_full_list))
+            hp_2_probablity = hp_2_probablity_sum / (255 * len(h2_full_list))
+            ttest_value = stats.ranksums(
+                h1_full_list, h2_full_list
+            )  # Do a ranksums test of two hp score lists
+            if (
+                ttest_value.pvalue < 0.05
+            ):  # if two score sets are significantly different
+                # if abs(hp_1_probablity-hp_2_probablity) >= 0.5:
+                hp_base_modification_probablity.update(
+                    {
+                        location: [
+                            hp_1_probablity,
+                            hp_2_probablity,
+                            ttest_value.pvalue,
+                            # abs(hp_1_probablity-hp_2_probablity)
+                        ]
+                    }
+                )
+
+    return hp_base_modification_probablity
+
+
+def get_assignment_max(
+    chromosome,
+    tagged_bam,
+    ref_seq,
+    phased_region_l,
+    snp_phased_region_l,
+    hp_threshold,
+    assignment_threshold,
+    k_iterations,
+):
+    '''
+        The main function of the program: assign reads and assign relationships between phased blocks.
+    '''
+    all_not_assigned_reads_increasing_dict = {}
+    hp0_assignment_df_dict = {}
+    modif_d = {}
+    hp_prob_d = {}
+    assignment_d = {}
+    if k_iterations == -1:
+        k_iterations = float("inf")
+    for index, phased_regions in enumerate(phased_region_l):
+
+        # test
+        modif_l = []
+        hp_prob_l = []
+        assignment_list = []
+
+        not_assigned_reads_list = []
+        increasing_assigned_num = float("inf")
+        cnt = 0
+        hp0_cnt = float("inf")
+        hp0_cnt_new = 0
+        modified_list = {}
+        assignment_df = pd.DataFrame(
+            columns=[
+                "read_id",
+                "read_len",
+                "phase_block",
+                "ref_start",
+                "ref_end",
+                "haplotype",
+                "hp_supportring_cgs",
+                "total_cgs",
+                "voting",
+            ]
+        )
+        # only add snp phased region first
+
+        cnt += 1
+        snp_phased_region = snp_phased_region_l[index]  # get snp phased block
+        # print(
+        #     f"processing phased region:{snp_phased_region[0]}-{snp_phased_region[1]}, iteration {cnt}",
+        #     end="\r",
+        # )
+        base_modification_list = get_base_modification_dictionary(  # build the dictionary with snp phased reads
+            tagged_bam, ref_seq, chromosome, phased_regions, snp_phased_region
+        )
+        hp_base_modification_prob = get_siginificant_probablity_dict(  # calculate the statistically significantly different CpGs
+            base_modification_list, modified_list, hp_min_num=hp_threshold
+        )
+        assignment_df = get_base_modification_list_snp_block(
+            tagged_bam,
+            ref_seq,
+            chromosome,
+            phased_regions,
+            hp_base_modification_prob,
+            assignment_df,
+            assignment_threshold,
+            hp_threshold,
+        )
+
+        modified_list = get_modified_list(
+            assignment_df, phased_regions, tagged_bam, chromosome, ref_seq
+        )
+        hp0_cnt_new = len(assignment_df[assignment_df.haplotype == 0])
+        increasing_assigned_num = hp0_cnt_new - hp0_cnt
+        hp0_cnt = hp0_cnt_new
+        not_assigned_reads_list.append(hp0_cnt)
+
+        while (increasing_assigned_num < 0) and (cnt <= k_iterations):
+            '''
+                start the iteration
+            '''
+            modif_l.append(modified_list)
+            hp_prob_l.append(hp_base_modification_prob)
+            assignment_list.append(assignment_df)
+
+            cnt += 1
+            # print(
+            #     f"processing unphased region:{phased_regions[0]}-{phased_regions[1]}, iteration {cnt}",
+            #     end="\r",
+            # )
+
+            hp_base_modification_prob = get_siginificant_probablity_dict(
+                base_modification_list, modified_list, hp_min_num=hp_threshold
+            )
+            assignment_df = get_base_modification_list(
+                tagged_bam,
+                ref_seq,
+                chromosome,
+                phased_regions,
+                hp_base_modification_prob,
+                assignment_df,
+                assignment_threshold,
+                hp_threshold,
+            )
+            modified_list = get_modified_list(
+                assignment_df, phased_regions, tagged_bam, chromosome, ref_seq
+            )
+            hp0_cnt_new = len(assignment_df[assignment_df.haplotype == 0])
+            increasing_assigned_num = hp0_cnt_new - hp0_cnt
+            # print(
+            #     f"increasing hp assignment: {hp0_cnt_new} - {hp0_cnt} = {increasing_assigned_num}",
+            #     end="\r",
+            # )
+            hp0_cnt = hp0_cnt_new
+            not_assigned_reads_list.append(hp0_cnt)
+
+        assignment_list.append(assignment_df)
+        modif_l.append(modified_list)
+        hp_prob_l.append(hp_base_modification_prob)
+        modif_d.update({index: modif_l})
+        hp_prob_d.update({index: hp_prob_l})
+        assignment_d.update({index: assignment_list})
+
+        all_not_assigned_reads_increasing_dict.update(
+            {phased_regions: not_assigned_reads_list}
+        )
+        hp0_assignment_df_dict.update({phased_regions: assignment_df})
+
+    return (
+        all_not_assigned_reads_increasing_dict,
+        hp0_assignment_df_dict,
+        modif_d,
+        hp_prob_d,
+        assignment_d,
+    )
+
+
+'''
+Benchmarking functions
+'''
+
+
+def get_overlap_reads_df(region_1, region_2, assignment_df):
+    df1 = assignment_df[region_1]
+    df2 = assignment_df[region_2]
+    df2_overlap = df2[df2.read_id.isin(df1.read_id)]
+    another_hap = []
+    for i in df2_overlap.read_id:
+        another_hap.append(df1[df1.read_id == i].iloc[0].haplotype)
+    df2_overlap["haplotype_in_connected_block"] = another_hap
+    overlap_df = df2_overlap[
+        (df2_overlap.haplotype != 0) & (
+            df2_overlap.haplotype_in_connected_block != 0)
+    ]
+    same_assignment_num = len(
+        overlap_df[overlap_df.haplotype ==
+                   overlap_df.haplotype_in_connected_block]
+    )
+    diff_assignment_num = len(
+        overlap_df[overlap_df.haplotype !=
+                   overlap_df.haplotype_in_connected_block]
+    )
+    return overlap_df, same_assignment_num, diff_assignment_num
+
+
+def get_phased_snp_dict(vcf_file, chromosome, start_loc, end_loc):
+    truth_vcf_file = VariantFile(vcf_file)
+    truth_snp_dict = {}
+    truth_snp_dict_hp = {}
+    # truth_snp_dict_hp2 = {}
+    truth_vcf = truth_vcf_file.fetch(chromosome, start_loc, end_loc)
+    for rec in truth_vcf:
+        rec = str(rec)
+        rec_list = rec.split("\t")
+        location = rec_list[1]
+        variant = (rec_list[3], rec_list[4])
+        tag_nums = rec_list[-1]
+        gt_tag = tag_nums.split(":")[0]
+        if gt_tag == "1|0" or gt_tag == "0|1":
+            truth_snp_dict_hp.update({location: [variant, gt_tag]})
+        # elif gt_tag == "0|1":
+        #     truth_snp_dict_hp2.update({location:[variant, gt_tag]})
+        truth_snp_dict.update({location: [variant, gt_tag]})
+    return truth_snp_dict_hp, truth_snp_dict
+
+def output_block_csv(chromosome, region_start_index, snp_phased_region_list, read_assignmentg_df, output_csv):
+    result_comparison_vcf = pd.DataFrame(
+        columns=[
+            "snp_phased_block_1",
+            "snp_phased_block_2",
+            "extended_phased_block_1",
+            "extended_phased_block_2",
+            # "vcf_file_relationship",
+            "myth_phasing_relationship",
+            "same_hap_num",
+            "diff_hap_num",
+            "olp_hp1_total_read_len",
+            "olp_hp2_total_read_len",
+            "olp_hp1_CpG_num",
+            "olp_hp2_CpG_num",
+            "olp_same_read_len",
+            "olp_not_same_read_len",
+            "olp_same_CpG_num",
+            "olp_not_same_CpG_num",
+        ]
+    )
+    for index, phased_region_item in enumerate(list(read_assignmentg_df.keys())):
+        result_comparison_l = []
+        # result_hp_df = read_assignmentg_df[phased_region_item]
+        # previous_result_hp_df_index_snp = phased_region_list[index-1]
+        previous_result_hp_df_index = list(
+            read_assignmentg_df.keys())[index - 1]
+        phased_snp_region_item = list(read_assignmentg_df.keys())[index]
+        overlaps_reads_df = get_overlap_reads_df(
+            previous_result_hp_df_index, phased_region_item, read_assignmentg_df
+        )[0]
+        phased_region_1 = snp_phased_region_list[region_start_index + index - 1]
+        phased_region_2 = snp_phased_region_list[region_start_index + index]
+        result_comparison_l += [  # display the regions
+            phased_region_1,
+            phased_region_2,
+            previous_result_hp_df_index,
+            phased_snp_region_item,
+        ]
+
+        # if (vcf_relationship_list[region_start_index + index - 1][1] == None) or (
+        #     vcf_relationship_list[region_start_index + index][1] == None
+        # ):
+        #     result_comparison_l += ["cannot decide"]
+        # elif (
+        #     vcf_relationship_list[region_start_index + index - 1][1]
+        #     == vcf_relationship_list[region_start_index + index][1]
+        # ):
+        #     result_comparison_l += ["same"]
+        # else:
+        #     result_comparison_l += ["not same"]
+
+        if len(overlaps_reads_df) > 0:
+            same_hap_num = len(
+                overlaps_reads_df[
+                    overlaps_reads_df.haplotype
+                    == overlaps_reads_df.haplotype_in_connected_block
+                ]
+            )
+
+            diff_hap_num = len(
+                overlaps_reads_df[
+                    overlaps_reads_df.haplotype
+                    != overlaps_reads_df.haplotype_in_connected_block
+                ]
+            )
+
+            if same_hap_num > diff_hap_num:
+                # 'meth_phasing_relationship' 
+                result_comparison_l += ["same", same_hap_num, diff_hap_num]
+            elif same_hap_num < diff_hap_num:
+                result_comparison_l += ["not same", same_hap_num, diff_hap_num]
+            else:
+                result_comparison_l += ["cannot decide",
+                                        same_hap_num, diff_hap_num]
+        else:
+            result_comparison_l += ["cannot decide", None, None]
+        total_hp_1_read_len = sum(
+            overlaps_reads_df[overlaps_reads_df.haplotype == 1].read_len
+        )
+        total_hp_2_read_len = sum(
+            overlaps_reads_df[overlaps_reads_df.haplotype == 2].read_len
+        )
+        total_same_read_len = sum(
+            overlaps_reads_df[
+                overlaps_reads_df.haplotype
+                == overlaps_reads_df.haplotype_in_connected_block
+            ].read_len
+        )
+        total_not_same_read_len = sum(
+            overlaps_reads_df[
+                overlaps_reads_df.haplotype
+                != overlaps_reads_df.haplotype_in_connected_block
+            ].read_len
+        )
+        total_same_CpG_num = sum(
+            overlaps_reads_df[
+                overlaps_reads_df.haplotype
+                == overlaps_reads_df.haplotype_in_connected_block
+            ].total_cgs
+        )
+        total_not_same_CpG_num = sum(
+            overlaps_reads_df[
+                overlaps_reads_df.haplotype
+                != overlaps_reads_df.haplotype_in_connected_block
+            ].total_cgs
+        )
+        total_hp_1_CpG_num = sum(
+            overlaps_reads_df[overlaps_reads_df.haplotype == 1].total_cgs
+        )
+        total_hp_2_CpG_num = sum(
+            overlaps_reads_df[overlaps_reads_df.haplotype == 2].total_cgs
+        )
+        result_comparison_l += [
+            total_hp_1_read_len,
+            total_hp_2_read_len,
+            total_hp_1_CpG_num,
+            total_hp_2_CpG_num,
+            total_same_read_len,
+            total_not_same_read_len,
+            total_same_CpG_num,
+            total_not_same_CpG_num,
+        ]
+        result_comparison_vcf.loc[len(
+            result_comparison_vcf.index)] = result_comparison_l  # type: ignore
+    result_comparison_vcf.to_csv(output_csv)
+
+    return
+
+def get_compared_vcf_relationship(
+    truth_vcf_file, called_vcf_file, chromosome, start_loc, end_loc, phased_region_list
+):
+    truth_vcf_dict_l = get_phased_snp_dict(
+        truth_vcf_file, chromosome, start_loc, end_loc
+    )
+    called_vcf_dict_l = get_phased_snp_dict(
+        called_vcf_file, chromosome, start_loc, end_loc
+    )
+    truth_snp_hap_df = pd.DataFrame.from_dict(
+        truth_vcf_dict_l[0], orient="index", columns=["truth_snp", "truth_hap"]
+    )
+    called_snp_hap_df = pd.DataFrame.from_dict(
+        called_vcf_dict_l[0], orient="index", columns=["called_snp", "called_hap"]
+    )
+    compare_df = truth_snp_hap_df.join(called_snp_hap_df)
+    compare_df.index = compare_df.index.astype("int")
+    compare_df["same"] = compare_df.truth_hap == compare_df.called_hap
+    compare_df = compare_df.dropna()
+    phased_region_truth_call_comparison = {}
+    for i in phased_region_list:
+        compare_df_region = compare_df[
+            (compare_df.index >= i[0]) & (compare_df.index <= i[1])
+        ]
+        same_counter = dict(Counter(list(compare_df_region.same)))
+        if (False in same_counter.keys()) and (True not in same_counter.keys()):
+            phased_region_truth_call_comparison.update({i: False})
+        elif (True in same_counter.keys()) and (False not in same_counter.keys()):
+            phased_region_truth_call_comparison.update({i: True})
+        elif len(same_counter.keys()) > 0:
+            if same_counter[False] > same_counter[True]:
+                phased_region_truth_call_comparison.update({i: False})
+            else:
+                phased_region_truth_call_comparison.update({i: True})
+        else:
+            phased_region_truth_call_comparison.update({i: None})
+    return phased_region_truth_call_comparison
+
+
+def get_coomparison_csv(
+    vcf_t,
+    vcf_c,
+    chromosome,
+    snp_phased_region_list,
+    region_start_index,
+    read_assignmentg_df,
+    output_csv,
+):
+    vcf_relationship = get_compared_vcf_relationship(
+        vcf_t,
+        vcf_c,
+        chromosome,
+        snp_phased_region_list[0][0],
+        snp_phased_region_list[-1][1],
+        snp_phased_region_list,
+    )
+    result_comparison_vcf = pd.DataFrame(
+        columns=[
+            "snp_phased_block_1",
+            "snp_phased_block_2",
+            "extended_phased_block_1",
+            "extended_phased_block_2",
+            "vcf_file_relationship",
+            "myth_phasing_relationship",
+            "same_hap_num",
+            "diff_hap_num",
+            "olp_hp1_total_read_len",
+            "olp_hp2_total_read_len",
+            "olp_hp1_CpG_num",
+            "olp_hp2_CpG_num",
+            "olp_same_read_len",
+            "olp_not_same_read_len",
+            "olp_same_CpG_num",
+            "olp_not_same_CpG_num",
+        ]
+    )
+    # relationship_between_phase_blocks = []
+    vcf_relationship_list = list(
+        zip(vcf_relationship.keys(), vcf_relationship.values())
+    )
+
+    for index, phased_region_item in enumerate(list(read_assignmentg_df.keys())):
+        result_comparison_l = []
+        # result_hp_df = read_assignmentg_df[phased_region_item]
+        # previous_result_hp_df_index_snp = phased_region_list[index-1]
+        previous_result_hp_df_index = list(
+            read_assignmentg_df.keys())[index - 1]
+        phased_snp_region_item = list(read_assignmentg_df.keys())[index]
+        overlaps_reads_df = get_overlap_reads_df(
+            previous_result_hp_df_index, phased_region_item, read_assignmentg_df
+        )[0]
+        phased_region_1 = snp_phased_region_list[region_start_index + index - 1]
+        phased_region_2 = snp_phased_region_list[region_start_index + index]
+        result_comparison_l += [  # display the regions
+            phased_region_1,
+            phased_region_2,
+            previous_result_hp_df_index,
+            phased_snp_region_item,
+        ]
+        if (vcf_relationship_list[region_start_index + index - 1][1] == None) or (
+            vcf_relationship_list[region_start_index + index][1] == None
+        ):
+            result_comparison_l += ["cannot decide"]
+        elif (
+            vcf_relationship_list[region_start_index + index - 1][1]
+            == vcf_relationship_list[region_start_index + index][1]
+        ):
+            result_comparison_l += ["same"]
+        else:
+            result_comparison_l += ["not same"]
+        if len(overlaps_reads_df) > 0:
+            same_hap_num = len(
+                overlaps_reads_df[
+                    overlaps_reads_df.haplotype
+                    == overlaps_reads_df.haplotype_in_connected_block
+                ]
+            )
+
+            diff_hap_num = len(
+                overlaps_reads_df[
+                    overlaps_reads_df.haplotype
+                    != overlaps_reads_df.haplotype_in_connected_block
+                ]
+            )
+
+            if same_hap_num > diff_hap_num:
+                result_comparison_l += ["same", same_hap_num, diff_hap_num]
+            elif same_hap_num < diff_hap_num:
+                result_comparison_l += ["not same", same_hap_num, diff_hap_num]
+            else:
+                result_comparison_l += ["cannot decide",
+                                        same_hap_num, diff_hap_num]
+        else:
+            result_comparison_l += ["cannot decide", None, None]
+        total_hp_1_read_len = sum(
+            overlaps_reads_df[overlaps_reads_df.haplotype == 1].read_len
+        )
+        total_hp_2_read_len = sum(
+            overlaps_reads_df[overlaps_reads_df.haplotype == 2].read_len
+        )
+        total_same_read_len = sum(
+            overlaps_reads_df[
+                overlaps_reads_df.haplotype
+                == overlaps_reads_df.haplotype_in_connected_block
+            ].read_len
+        )
+        total_not_same_read_len = sum(
+            overlaps_reads_df[
+                overlaps_reads_df.haplotype
+                != overlaps_reads_df.haplotype_in_connected_block
+            ].read_len
+        )
+        total_same_CpG_num = sum(
+            overlaps_reads_df[
+                overlaps_reads_df.haplotype
+                == overlaps_reads_df.haplotype_in_connected_block
+            ].total_cgs
+        )
+        total_not_same_CpG_num = sum(
+            overlaps_reads_df[
+                overlaps_reads_df.haplotype
+                != overlaps_reads_df.haplotype_in_connected_block
+            ].total_cgs
+        )
+        total_hp_1_CpG_num = sum(
+            overlaps_reads_df[overlaps_reads_df.haplotype == 1].total_cgs
+        )
+        total_hp_2_CpG_num = sum(
+            overlaps_reads_df[overlaps_reads_df.haplotype == 2].total_cgs
+        )
+        result_comparison_l += [
+            total_hp_1_read_len,
+            total_hp_2_read_len,
+            total_hp_1_CpG_num,
+            total_hp_2_CpG_num,
+            total_same_read_len,
+            total_not_same_read_len,
+            total_same_CpG_num,
+            total_not_same_CpG_num,
+        ]
+        result_comparison_vcf.loc[len(
+            result_comparison_vcf.index)] = result_comparison_l  # type: ignore
+    result_comparison_vcf.to_csv(output_csv)
+
+
+def main(argv):
+    # parse args
+    args = parse_arg(argv)
+    bam_file = args.bam_file
+    ref_seq = pysam.FastaFile(args.reference)
+    phased_block_df = pd.read_csv(
+        args.phased_blocks,
+        header=None,
+        sep="\t",
+        names=[
+            "chr",
+            "phasing",
+            "ex/intron",
+            "start",
+            "end",
+            "1",
+            "strand",
+            "2",
+            "info",
+        ],
+    )
+    skipping_block_pair_str = args.skipping_pair
+    threads = args.threads
+    tagged_bam = pysam.AlignmentFile(bam_file, "rb", threads=threads)
+    chromosome = args.chromosome
+    phased_block_df = phased_block_df[phased_block_df.chr == chromosome]
+    vcf_truth = args.vcf_truth
+    vcf_called = args.vcf_called
+    n_blocks = args.targeting_blocks
+    hp_min_number = args.assignment_min
+    minimum_voting = args.cut_off
+    max_len_to_edge = args.max_SNPs
+    read_assignment_output = args.read_assignment
+    bridge_only = args.bridge_only
+    targetd_blocks = []
+    k_iterations = args.k_iterations
+    if n_blocks == "all":
+        targetd_blocks = [0, len(phased_block_df)]
+    else:
+        targetd_blocks = [int(x) for x in n_blocks.split(",")]
+    # print(targetd_blocks)
+    # if targetd_blocks[1]-targetd_blocks[0] == 1:
+    #     print(targetd_blocks)
+
+    output_csv = args.output_csv
+    # initial phasing regions
+    phased_region_list = list(
+        zip(phased_block_df.start, phased_block_df.end)
+    )  # snp phased blocks
+    max_expension_list_larger = []  # extended phased blocks
+    max_expension_list_larger += [(phased_region_list[0]
+                                   [0], phased_region_list[1][0])]
+    
+
+    skipping_block_pair_start = [
+        int(i) for i in skipping_block_pair_str.replace(" ", "")[1:-1].split(",")]
+    if skipping_block_pair_start != [-2]:
+        skipping_block_pair_end = [i + 1 for i in skipping_block_pair_start]
+    else:
+        skipping_block_pair_end = []
+        skipping_block_pair_start = []
+    for index, region in enumerate(phased_region_list):
+        if index == 0 or index == len(phased_region_list) - 1:
+            continue
+        elif index in skipping_block_pair_start:
+            left_most = phased_region_list[index - 1][1]
+            right_most = phased_region_list[index][1]
+            max_expension_list_larger += [(left_most, right_most)]
+            # print(index, skipping_block_pair_start, (left_most, right_most))
+        elif index in skipping_block_pair_end:
+            left_most = phased_region_list[index][0]
+            right_most = phased_region_list[index + 1][0]
+            max_expension_list_larger += [(left_most, right_most)]
+            # print(index, skipping_block_pair_end, (left_most, right_most))
+        else:
+            left_most = phased_region_list[index - 1][1]
+            right_most = phased_region_list[index + 1][0]
+            max_expension_list_larger += [(left_most, right_most)]
+    max_expension_list_larger += [
+        (phased_region_list[-2][1], phased_region_list[-1][1])
+    ]
+
+    if max_len_to_edge == None:
+        max_len_to_edge = float('inf')
+
+
+    (
+        assigned_reads_increasing_list,
+        unphased_reads_assignment_dataframes,
+        modification_dict,
+        hp_prob_dict,
+        assignment_dict,
+    ) = get_assignment_max(
+        chromosome,
+        tagged_bam,
+        ref_seq,
+        max_expension_list_larger[targetd_blocks[0]: targetd_blocks[1]],
+        phased_region_list[targetd_blocks[0]: targetd_blocks[1]],
+        hp_min_number,
+        minimum_voting,
+        k_iterations,
+    )
+    if vcf_truth == "":
+        output_block_csv(chromosome, 
+            targetd_blocks[0],
+            phased_region_list,
+            unphased_reads_assignment_dataframes,
+            output_csv,)
+    else:
+        get_coomparison_csv(
+            vcf_truth,
+            vcf_called,
+            chromosome,
+            phased_region_list,
+            targetd_blocks[0],
+            unphased_reads_assignment_dataframes,
+            output_csv,
+        )
+    if read_assignment_output:
+        for index, phase_block_name in enumerate(unphased_reads_assignment_dataframes.keys()):
+            current_block_num = index + targetd_blocks[0]
+            unphased_reads_assignment_dataframes[phase_block_name].to_csv(os.path.join(
+                read_assignment_output, f"{current_block_num}_{phase_block_name[0]}_{phase_block_name[1]}.csv"))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

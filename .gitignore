@@ -1,0 +1,5 @@
+.ipynb_checkpoints/
+.vscode/
+test_data/
+processing_folder/
+.nfs*

@@ -1,0 +1,16 @@
+name: methphaser
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+  - anaconda
+dependencies:
+  - pysam
+  - tqdm
+  - ca-certificates
+  - openssl
+  - pandas
+  - scipy
+  - matplotlib
+  - certifi
+  - seaborn

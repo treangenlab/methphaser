@@ -28,7 +28,7 @@ Requirement:
           
 Recomanded phasing flow: 
 
-        ![flowchart drawio](https://github.com/treangenlab/methphaser/assets/13065758/c74e5a1d-1c24-49c0-abe3-5b125f43f7eb)
+   ![flowchart drawio](https://github.com/treangenlab/methphaser/assets/13065758/c74e5a1d-1c24-49c0-abe3-5b125f43f7eb)
 
 
 ## Example 

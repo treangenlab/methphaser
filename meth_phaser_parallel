@@ -26,7 +26,7 @@ def parse_arg(argv):
         type=str,
         help="input methylation annotated bam file",
         required=True,
-        metavar="",
+        # metavar="",
     )
     required_args.add_argument(
         "-r",
@@ -34,7 +34,7 @@ def parse_arg(argv):
         type=str,
         help="reference genome",
         required=True,
-        metavar="",
+        # metavar="",
     )
     required_args.add_argument(
         "-g",
@@ -42,7 +42,7 @@ def parse_arg(argv):
         type=str,
         help="gtf file from whatshap visualization",
         required=True,
-        metavar="",
+        # metavar="",
     )
     required_args.add_argument(
         "-vc",
@@ -50,7 +50,7 @@ def parse_arg(argv):
         type=str,
         help="called vcf file from HapCUT2",
         required=True,
-        metavar="",
+        # metavar="",
     )
     parser.add_argument(
         "-vt",
@@ -58,7 +58,7 @@ def parse_arg(argv):
         type=str,
         help="Truth vcf file for benchmarking",
         default=None,
-        metavar="",
+        # metavar="",
     )
     parser.add_argument(
         "-t", "--threads", type=int, help="threads", default=1, metavar=""

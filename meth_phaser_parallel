@@ -26,7 +26,7 @@ def parse_arg(argv):
         type=str,
         help="input methylation annotated bam file",
         required=True,
-        metavar="",
+        # metavar="",
     )
     required_args.add_argument(
         "-r",
@@ -34,7 +34,7 @@ def parse_arg(argv):
         type=str,
         help="reference genome",
         required=True,
-        metavar="",
+        # metavar="",
     )
     required_args.add_argument(
         "-g",
@@ -42,7 +42,7 @@ def parse_arg(argv):
         type=str,
         help="gtf file from whatshap visualization",
         required=True,
-        metavar="",
+        # metavar="",
     )
     required_args.add_argument(
         "-vc",
@@ -50,7 +50,7 @@ def parse_arg(argv):
         type=str,
         help="called vcf file from HapCUT2",
         required=True,
-        metavar="",
+        # metavar="",
     )
     parser.add_argument(
         "-vt",
@@ -58,10 +58,11 @@ def parse_arg(argv):
         type=str,
         help="Truth vcf file for benchmarking",
         default=None,
-        metavar="",
+        # metavar="",
     )
     parser.add_argument(
-        "-t", "--threads", type=int, help="threads", default=1, metavar=""
+        "-t", "--threads", type=int, help="threads", default=1, 
+        # metavar=""
     )
     parser.add_argument(
         "-ml",
@@ -69,7 +70,7 @@ def parse_arg(argv):
         type=int,
         help="maximum homozygous region length for phasing, default: -1 (ignore the largest homozygous region, centromere), input -2 for not skipping anything",
         default=-1,
-        metavar="",
+        # metavar="",
     )
     parser.add_argument(
         "-c",
@@ -77,7 +78,7 @@ def parse_arg(argv):
         type=float,
         help="the minimum percentage of vote to determine a read's haplotype",
         default=0.65,
-        metavar="",
+        # metavar="",
     )
     parser.add_argument(
         "-a",
@@ -85,7 +86,7 @@ def parse_arg(argv):
         type=int,
         help="minimum assigned read number for ranksum test",
         default=2,
-        metavar="",
+        # metavar="",
     )
     parser.add_argument(
         "-o",
@@ -93,7 +94,7 @@ def parse_arg(argv):
         type=str,
         help="output_directory",
         default="work/",
-        metavar="",
+        # metavar="",
     )
     parser.add_argument(
         "-k",
@@ -101,7 +102,7 @@ def parse_arg(argv):
         type=int,
         help="use at most k iterations, use -1 for unlimited iterations.",
         default="10",
-        metavar="",
+        # metavar="",
     )
 
     if len(argv) == 0:

@@ -306,7 +306,9 @@ def get_altered_vcf(original_vcf, output_vcf, block_relationship_dfs):
                                 # print(split_rec, start_loc)
                                 split_rec[-1] = split_rec[-1].replace(start_loc, get_altered_block_start_loc(current_chrom_final_block, int(start_loc)))  # type: ignore
                                 rec = "\t".join(split_rec)
-                            altered_vcf_file.writelines(rec.replace("1|0", "0|1"))
+                                rec = f"{rec}\n"
+                                print(rec)
+                                altered_vcf_file.writelines(rec.replace("1|0", "0|1"))
                         elif "0|1" in rec:
                             if "PS" in rec.split("\t")[-2]:
                                 split_rec = rec.split("\t")
@@ -315,7 +317,9 @@ def get_altered_vcf(original_vcf, output_vcf, block_relationship_dfs):
                                 # print(split_rec, start_loc)
                                 split_rec[-1] = split_rec[-1].replace(start_loc, get_altered_block_start_loc(current_chrom_final_block, int(start_loc)))  # type: ignore
                                 rec = "\t".join(split_rec)
-                            altered_vcf_file.writelines(rec.replace("0|1", "1|0"))
+                                rec = f"{rec}\n"
+                                print(rec)
+                                altered_vcf_file.writelines(rec.replace("0|1", "1|0"))
                         else:
                             altered_vcf_file.writelines(rec)
             flpl = [x[0] for x in flipping_list]

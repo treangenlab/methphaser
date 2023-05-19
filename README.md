@@ -1,6 +1,7 @@
 # MethPhaser
 
 Requirement: 
+ Need to put the executable methphasing into bashrc for meth_phaser_parallel to call it. exact command: export "PATH=/path/to/methphaser/:$PATH"
  check methphaser.yaml
  
  

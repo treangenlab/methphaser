@@ -1,6 +1,7 @@
 # MethPhaser
-![alt text]([http://url/to/img.png](https://anaconda.org/bioconda/methphaser/badges/license.svg))
-
+[![Anaconda-Server Badge](https://anaconda.org/bioconda/methphaser/badges/license.svg)](https://anaconda.org/bioconda/methphaser)
+[![Anaconda-Server Badge](https://anaconda.org/bioconda/methphaser/badges/version.svg)](https://anaconda.org/bioconda/methphaser)
+[![Anaconda-Server Badge](https://anaconda.org/bioconda/methphaser/badges/downloads.svg)](https://anaconda.org/bioconda/methphaser)
 ## Install:
   1. Through conda: `conda install -c bioconda methphaser`
   2. Through github download: 

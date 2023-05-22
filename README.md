@@ -3,7 +3,7 @@
 [![Anaconda-Server Badge](https://anaconda.org/bioconda/methphaser/badges/version.svg)](https://anaconda.org/bioconda/methphaser)
 [![Anaconda-Server Badge](https://anaconda.org/bioconda/methphaser/badges/downloads.svg)](https://anaconda.org/bioconda/methphaser)
 ## Install:
-  1. Through conda: `conda install -c bioconda methphaser`
+  1. Through mamba or conda: `mamba install -c bioconda methphaser`, `conda install -c bioconda methphaser`
   2. Through github download: 
       1. Need to put the executable `methphasing` into `~/.bashrc` for `meth_phaser_parallel` to call it. exact command: `export "PATH=/path/to/methphaser/:$PATH"`
       2. Other package requirements: check `methphaser.yaml`

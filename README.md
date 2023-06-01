@@ -43,6 +43,9 @@ Step 2: Run post processing script to get modified reads and vcf file
 ```
 
 
+Note: The BAM file should only contain primary alignment (no secondary alignment and supplementary alignment), otherwise it will trigger pysam MM tag reading error. Suggested command:
+`samtools view -bF 2304 -o output.bam input.bam`
+
 
 Recomanded phasing flow: 
 

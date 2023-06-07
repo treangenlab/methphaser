@@ -9,6 +9,8 @@
       2. Other package requirements: check `methphaser.yaml`
 
 ## Usage
+!!! NOTE: MethPhaser won't work on sex chromosomes because of random X inactivation! Please only consider autosomes. !!!
+
 ### Example 
 Step 1: Run MethPhaser to get block relationship. MethPhaser default ignores the largest unphased region (`-ml -1`), if the input data does not contain any large poorly mapped region like centromere, please use `-ml -2` to not ignore any gap. 
 

@@ -92,6 +92,20 @@ def parse_arg(argv):
         help="Enable high success rate parameter",
         action="store_true",
     )
+    parser.add_argument(
+        "-mc",
+        "--minimum_coverage",
+        help="Minimum read number to assign blocks' relationship. default: 0. Recommanded setting: mc = coverage/(autosome-wide block number/1000), for details please see the paper",
+        default=0,
+        metavar="",
+    )
+    parser.add_argument(
+        "-vd",
+        "--voting_difference",
+        help="minimum voting difference for relationship assignment, default=0.5",
+        default=0.5,
+        metavar="",
+    )
     if len(argv) == 0:
         parser.print_help(sys.stderr)
         sys.exit(1)
@@ -616,39 +630,14 @@ def main(argv):
     # phsed_block_file = ""
     vcf_truth = args.vcf_truth
     vcf_called = args.vcf_called
-    chroms = [
-        "chr1",
-        "chr2",
-        "chr3",
-        "chr4",
-        "chr5",
-        "chr6",
-        "chr7",
-        "chr8",
-        "chr9",
-        "chr10",
-        "chr11",
-        "chr12",
-        "chr13",
-        "chr14",
-        "chr15",
-        "chr16",
-        "chr17",
-        "chr18",
-        "chr19",
-        "chr20",
-        "chr21",
-        "chr22",
-    ]
-
-    # if high_acc_parameter:
-    #     block_relationship_dfs = get_block_relationships(methphsing_output_folder, min_required_read=int(coverage / 4), min_diff_perc=0.5)  # type: ignore
+    min_coverage = args.minimum_coverage
+    votting_difference = args.voting_difference
     if high_sr_parameter:
         block_relationship_dfs = get_block_relationships(
             methphsing_output_folder, min_required_read=0, min_diff_perc=0
         )
     else:
-        block_relationship_dfs = get_block_relationships(methphsing_output_folder, min_required_read=int(coverage / 4), min_diff_perc=0.5)  # type: ignore
+        block_relationship_dfs = get_block_relationships(methphsing_output_folder, min_required_read=min_coverage, min_diff_perc=votting_difference)  # type: ignore
 
     # output VCF file
     # print((block_relationship_dfs['chr1']))

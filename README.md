@@ -10,6 +10,7 @@
 
 ## Usage
 !!! NOTE: MethPhaser won't work on sex chromosomes because of random X inactivation! Please only consider autosomes. !!!
+
 !!! We recommend using MethPhaser for at least 30X coverage ONT reads since most of the SNV phasing methods (HapCUT2, Whatshap) only work reasonably above that coverage !!!
 ### Example 
 Step 1: Run MethPhaser to get block relationship. MethPhaser default ignores the largest unphased region (`-ml -1`), if the input data does not contain any large poorly mapped region like centromere, please use `-ml -2` to not ignore any gap. 

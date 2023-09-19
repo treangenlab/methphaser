@@ -13,6 +13,7 @@
 
 !!! We recommend using MethPhaser for at least 30X coverage ONT reads since most of the SNV phasing methods (HapCUT2, Whatshap) only work reasonably above that coverage !!!
 ### Example 
+Test data at https://zenodo.org/record/8360845 
 Step 1: Run MethPhaser to get block relationship. MethPhaser default ignores the largest unphased region (`-ml -1`), if the input data does not contain any large poorly mapped region like centromere, please use `-ml -2` to not ignore any gap. 
 
         ./meth_phaser_parallel -b test_data/HLA.R10.haplotagged.bam -r test_data/GCA_000001405.15_GRCh38_no_alt_analysis_set.chr6.fna -g test_data/LSK.filtered.gtf -vc test_data/HLA.R10.phased.vcf.gz  -o test_data/work 

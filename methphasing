@@ -600,8 +600,10 @@ def get_base_modification_list_snp_block(
             if mm != -1 and mm != {}:
                 if methylation_identifier_0 in list(mm.keys()):
                     methylation_identifier = methylation_identifier_0
-                else:
+                elif methylation_identifier_1 in list(mm.keys()):
                     methylation_identifier = methylation_identifier_1
+                else: 
+                    continue
                 for i in mm[methylation_identifier]:
                     if read_base_ref_loc[i[0]]:
                         if reads.is_forward:

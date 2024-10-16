@@ -312,26 +312,23 @@ def get_altered_vcf(original_vcf, output_vcf, block_relationship_dfs):
                     if i[1] == 1:
                         altered_vcf_file.writelines(rec)
                     else:
-                        if "1|0" in rec:
-                            if "PS" in rec.split("\t")[-2]:
-                                split_rec = rec.split("\t")
+                        split_rec = rec.split("\t")
+                        if "1|0" in split_rec[-1]:
+                            if "PS" in split_rec[-2]:
                                 ps_tag_location = split_rec[-2].split(":").index("PS")
                                 start_loc = split_rec[-1].split(":")[ps_tag_location]
                                 # print(split_rec, start_loc)
                                 split_rec[-1] = split_rec[-1].replace(start_loc, get_altered_block_start_loc(current_chrom_final_block, int(start_loc)))  # type: ignore
-                                rec = "\t".join(split_rec)
-                                rec = f"{rec}\n"
-                            altered_vcf_file.writelines(rec.replace("1|0", "0|1"))
-                        elif "0|1" in rec:
-                            if "PS" in rec.split("\t")[-2]:
-                                split_rec = rec.split("\t")
+                            split_rec[-1] = split_rec[-1].replace("1|0", "0|1")
+                            altered_vcf_file.writelines("\t".join(split_rec)+"\n")
+                        elif "0|1" in split_rec[-1]:
+                            if "PS" in split_rec[-2]:
                                 ps_tag_location = split_rec[-2].split(":").index("PS")
                                 start_loc = split_rec[-1].split(":")[ps_tag_location]
                                 # print(split_rec, start_loc)
                                 split_rec[-1] = split_rec[-1].replace(start_loc, get_altered_block_start_loc(current_chrom_final_block, int(start_loc)))  # type: ignore
-                                rec = "\t".join(split_rec)
-                                rec = f"{rec}\n"
-                            altered_vcf_file.writelines(rec.replace("0|1", "1|0"))
+                            split_rec[-1] = split_rec[-1].replace("0|1", "1|0")
+                            altered_vcf_file.writelines("\t".join(split_rec)+"\n")
                         else:
                             altered_vcf_file.writelines(rec)
             flpl = [x[0] for x in flipping_list]

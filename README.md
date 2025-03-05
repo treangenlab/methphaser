@@ -51,6 +51,9 @@ Note: The BAM file should only contain primary alignment (no secondary alignment
 `samtools view -bF 2304 -o output.bam input.bam`
 
 
+Thanks to Timothy Mosbruger for bug catching the post processing script
+
+
 Recomanded phasing flow: 
 
    ![flowchart drawio](https://github.com/treangenlab/methphaser/assets/13065758/c74e5a1d-1c24-49c0-abe3-5b125f43f7eb)

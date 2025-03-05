@@ -10,7 +10,7 @@ from multiprocessing import Pool
 import pysam
 from pathlib import Path
 from tqdm.auto import tqdm
-import seaborn as sns
+#import seaborn as sns
 from itertools import groupby
 from operator import itemgetter
 
@@ -96,6 +96,7 @@ def parse_arg(argv):
         "-mc",
         "--minimum_coverage",
         help="Minimum read number to assign blocks' relationship. default: 0. Recommanded setting: mc = coverage/(autosome-wide block number/1000), for details please see the paper",
+        type=int,
         default=0,
         metavar="",
     )
@@ -103,6 +104,7 @@ def parse_arg(argv):
         "-vd",
         "--voting_difference",
         help="minimum voting difference for relationship assignment, default=0.5",
+        type=float,
         default=0.5,
         metavar="",
     )
@@ -202,10 +204,12 @@ def get_altered_vcf(original_vcf, output_vcf, block_relationship_dfs):
     remaining_dict = {}
     final_phase_block_dict = {}
     os.makedirs(os.path.dirname(f"./{output_vcf}"), exist_ok=True) 
+    updated_chroms = set()
     with open(output_vcf, "w") as altered_vcf_file:
         altered_vcf_file.writelines(str(called_vcf_file.header))
         for chrom in tqdm(block_relationship_dfs.keys()):
             # chrom = 'chr1'
+            updated_chroms.add(chrom)
             current_chrom_final_block = get_all_final_blocks_dict(
                 block_relationship_dfs
             )[chrom]
@@ -215,7 +219,7 @@ def get_altered_vcf(original_vcf, output_vcf, block_relationship_dfs):
             flipping_list = []
             block_num = 0
             # print(current_chrom_block_relationship_df)
-            while block_num < len(current_chrom_block_relationship_df) - 1:
+            while block_num < len(current_chrom_block_relationship_df):
                 current_block_row = current_chrom_block_relationship_df.iloc[block_num]
                 if (
                     current_block_row.myth_phasing_relationship == "cannot decide"
@@ -298,42 +302,49 @@ def get_altered_vcf(original_vcf, output_vcf, block_relationship_dfs):
                 )
 
             for i in unphased_list:
-                called_vcf = called_vcf_file.fetch(chrom, i[0], i[1])
+                called_vcf = called_vcf_file.fetch(chrom, i[0], i[1] - 1)
                 for rec in called_vcf:
                     rec = str(rec)
                     altered_vcf_file.writelines(rec)
             for i in flipping_list:
                 current_block = eval(i[0])
                 called_vcf = called_vcf_file.fetch(
-                    chrom, current_block[0], current_block[1]
+                    chrom, current_block[0] - 1, current_block[1]
                 )
                 for rec in called_vcf:
                     rec = str(rec)
-                    if i[1] == 1:
-                        altered_vcf_file.writelines(rec)
-                    else:
-                        if "1|0" in rec:
-                            if "PS" in rec.split("\t")[-2]:
-                                split_rec = rec.split("\t")
-                                ps_tag_location = split_rec[-2].split(":").index("PS")
-                                start_loc = split_rec[-1].split(":")[ps_tag_location]
-                                # print(split_rec, start_loc)
-                                split_rec[-1] = split_rec[-1].replace(start_loc, get_altered_block_start_loc(current_chrom_final_block, int(start_loc)))  # type: ignore
-                                rec = "\t".join(split_rec)
-                                rec = f"{rec}\n"
+                    if "1|0" in rec:
+                        if "PS" in rec.split("\t")[-2]:
+                            split_rec = rec.split("\t")
+                            ps_tag_location = split_rec[-2].split(":").index("PS")
+                            start_loc = split_rec[-1].split(":")[ps_tag_location]
+                            # print(split_rec, start_loc)
+                            split_rec[-1] = split_rec[-1].replace(start_loc,
+                                                                  get_altered_block_start_loc(current_chrom_final_block,
+                                                                                              int(start_loc)))  # type: ignore
+                            rec = "\t".join(split_rec)
+                            rec = f"{rec}"
+                        if i[1] == -1:
                             altered_vcf_file.writelines(rec.replace("1|0", "0|1"))
-                        elif "0|1" in rec:
-                            if "PS" in rec.split("\t")[-2]:
-                                split_rec = rec.split("\t")
-                                ps_tag_location = split_rec[-2].split(":").index("PS")
-                                start_loc = split_rec[-1].split(":")[ps_tag_location]
-                                # print(split_rec, start_loc)
-                                split_rec[-1] = split_rec[-1].replace(start_loc, get_altered_block_start_loc(current_chrom_final_block, int(start_loc)))  # type: ignore
-                                rec = "\t".join(split_rec)
-                                rec = f"{rec}\n"
+                        else:
+                            altered_vcf_file.writelines(rec)
+                    elif "0|1" in rec:
+                        if "PS" in rec.split("\t")[-2]:
+                            split_rec = rec.split("\t")
+                            ps_tag_location = split_rec[-2].split(":").index("PS")
+                            start_loc = split_rec[-1].split(":")[ps_tag_location]
+                            # print(split_rec, start_loc)
+                            split_rec[-1] = split_rec[-1].replace(start_loc,
+                                                                  get_altered_block_start_loc(current_chrom_final_block,
+                                                                                              int(start_loc)))  # type: ignore
+                            rec = "\t".join(split_rec)
+                            rec = f"{rec}"
+                        if i[1] == -1:
                             altered_vcf_file.writelines(rec.replace("0|1", "1|0"))
                         else:
                             altered_vcf_file.writelines(rec)
+                    else:
+                        altered_vcf_file.writelines(rec)
             flpl = [x[0] for x in flipping_list]
             remaining_list = [
                 x
@@ -352,11 +363,18 @@ def get_altered_vcf(original_vcf, output_vcf, block_relationship_dfs):
             for i in remaining_list:
                 current_block = eval(i)
                 called_vcf = called_vcf_file.fetch(
-                    chrom, current_block[0], current_block[1]
+                    chrom, current_block[0] - 1, current_block[1]
                 )
                 for rec in called_vcf:
                     rec = str(rec)
                     altered_vcf_file.writelines(rec)
+
+        for chrom in called_vcf_file.header.contigs:
+            if chrom not in updated_chroms:
+                print(chrom)
+                for record in called_vcf_file.fetch(chrom):
+                    altered_vcf_file.write(str(record))
+
     # print(final_block_dict, remaining_dict, flipping_dict, unphased_list)
     return final_block_dict, remaining_dict, flipping_dict
 
@@ -552,11 +570,11 @@ def per_chromosome_precision_recall(
         chr_result_df.loc[len(chr_result_df.index)] = [chr_num, 0 if crr_num + err_num == 0 else crr_num / (crr_num + err_num), "accuracy"]  # type: ignore
         chr_result_df.loc[len(chr_result_df.index)] = [chr_num, 0 if total_len == 0 else crr_num / total_len, "success rate"]  # type: ignore
         chr_result_df = chr_result_df.sort_values(by="chr")
-    sns_bar = sns.barplot(
-        data=chr_result_df, x="chr", y="accuracy/success rate", hue="a/s"
-    )
-    fig = sns_bar.get_figure()
-    fig.savefig(figure_output)
+    #sns_bar = sns.barplot(
+    #    data=chr_result_df, x="chr", y="accuracy/success rate", hue="a/s"
+    #)
+    #fig = sns_bar.get_figure()
+    #fig.savefig(figure_output)
     return (genome_crr_num, genome_err_num, genome_all_num)
 
 
@@ -688,3 +706,4 @@ def main(argv):
 
 if __name__ == "__main__":
     main(sys.argv[1:])
+

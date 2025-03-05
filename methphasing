@@ -238,8 +238,10 @@ def get_base_modification_dictionary(
         if (mm != -1) and (mm != {}):  # update base modification scores list
             if methylation_identifier_0 in list(mm.keys()):
                 methylation_identifier = methylation_identifier_0
-            else:
+            elif methylation_identifier_1 in list(mm.keys()):
                 methylation_identifier = methylation_identifier_1
+            else: 
+                continue
             for i in mm[methylation_identifier]:  # Remora only output one type of score: c 1 m/c 0 m, but this part can be improved for other methlyation callers
                 if read_base_ref_loc[i[0]]:  # i format: (loc, score)
                     if reads.is_forward:  # cg/gc on forward and reverse reads
@@ -314,8 +316,10 @@ def get_modified_list(assignment_df, phase_region, sam_file, chromosome, ref_seq
             if mm != -1 and mm != {} :
                 if methylation_identifier_0 in list(mm.keys()):
                     methylation_identifier = methylation_identifier_0
-                else:
+                elif methylation_identifier_1 in list(mm.keys()):
                     methylation_identifier = methylation_identifier_1
+                else: 
+                    continue
                 for i in mm[methylation_identifier]:
                     if read_base_ref_loc[i[0]]:
                         if reads.is_forward:
@@ -387,8 +391,10 @@ def get_base_modification_list(
             if mm != -1 and mm != {}:
                 if methylation_identifier_0 in list(mm.keys()):
                     methylation_identifier = methylation_identifier_0
-                else:
+                elif methylation_identifier_1 in list(mm.keys()):
                     methylation_identifier = methylation_identifier_1
+                else: 
+                    continue
                 for i in mm[methylation_identifier]:
                     if read_base_ref_loc[i[0]]:
                         if reads.is_forward:
@@ -594,8 +600,10 @@ def get_base_modification_list_snp_block(
             if mm != -1 and mm != {}:
                 if methylation_identifier_0 in list(mm.keys()):
                     methylation_identifier = methylation_identifier_0
-                else:
+                elif methylation_identifier_1 in list(mm.keys()):
                     methylation_identifier = methylation_identifier_1
+                else: 
+                    continue
                 for i in mm[methylation_identifier]:
                     if read_base_ref_loc[i[0]]:
                         if reads.is_forward:
